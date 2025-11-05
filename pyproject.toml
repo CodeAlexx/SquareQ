@@ -1,0 +1,26 @@
+[project]
+name = "squareq"
+version = "0.1.0"
+description = "Quantized block swapping and BP8 slab tooling for diffusion models"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "AI-Toolkit Contributors" }]
+dependencies = [
+    "torch>=2.1",
+    "triton>=2.1",
+    "numpy",
+    "safetensors",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
