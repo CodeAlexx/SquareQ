@@ -128,6 +128,7 @@ tests/          # contract & log‑parser tests
 ---
 
 ## Usage notes & guardrails
+with SquaredQ used, bp8 slab , actually used forward is 11.7 gigs used, back prop at 21.2 gigs. pytorch handles it. there is much room for improvement 
 
 - **BP8 mode:** move model **scaffold** to GPU, then `attach_bp8_slab()`. **Do not call** `.to(dtype=...)` after attaching the slab or you will materialize BF16 weights and lose savings.
 - **QuantLinear contract:** no float `weight` Parameter. Buffers only: `qweight:int8`, `scale:fp32`, `zero:fp32`, optional `bias:fp32`.
