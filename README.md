@@ -1,5 +1,10 @@
 # SquareQ
 # SQUARE‑Q
+“SquaredQ stores the model as an INT8 slab on disk/CPU and streams one block at a time into VRAM. It computes directly on the INT8 weights with a fused kernel and then evicts the block, so the full model never lives in GPU memory.”
+
+Why it’s different: “Most quant libs (BnB/Quanto) quantize then keep the whole model resident in VRAM; classic swapping frameworks swap FP16/BF16. SquaredQ swaps INT8 blocks, which is smaller and training-friendly.”
+
+Why it works for training: “SquaredQ keeps base weights frozen in INT8; only small LoRA adapters receive FP32 gradients, so backprop fits on 24 GB.
 Personal Note: 
 I did this a prototype to add to my rust trainer, and provides a proof of concept system. i am happy with the results. 
 **Where I’ll take it next (beating or matching SVDQuant, practically):**  
