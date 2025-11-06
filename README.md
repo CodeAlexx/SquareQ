@@ -183,7 +183,7 @@ We do **not** claim SOTA speed; the point is training feasibility on 24 GB.
 
 TBD by repository owner.
 
-Experimental quantized block-swapping backend extracted from ai-toolkit. Provides BP8 slab tooling, fused Triton kernels, and LoRA-enabled runtime helpers for Flux-style diffusion models.
+Experimental quantized block-swapping backend extracted written for ai-toolkit. Provides BP8 slab tooling, fused Triton kernels, and LoRA-enabled runtime helpers for Flux-style diffusion models.
 
 ## Quickstart
 
