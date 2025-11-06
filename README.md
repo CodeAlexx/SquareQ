@@ -203,6 +203,30 @@ python scripts/test_flux_bp8_pipeline.py --mode bp8 --slab-path output/flux1_dev
 ```
 python scripts/test_flux_bp8_lora_vram.py --height 384 --width 384 --rank 8 --slab-path output/flux1_dev_bp8_all_layers.fpk
 ```
+WHY? 
+Deterministic VRAM budget (no surprises).
+Off-the-shelf stacks “discover” memory at runtime (optimizer states, transient buffers, padding, longer prompts). A slab pins weight bytes and layout up front, so you know exactly what fits—and keep headroom for activations.
+
+Cold-start & reload speed.
+One mmapped blob loads fast (fewer fs syscalls, no per-tensor allocator churn). Matters for multi-run experiments and quick back-to-back evals.
+
+Block-swap without re-quantizing.
+Your SQUARE-Q slab keeps per-block scales + offsets; you can swap DiT/MMDiT/UNet/attn/MLP blocks and test variants without a fresh quant pass. Off-the-shelf formats rarely preserve that contract.
+
+Fragmentation & allocator sanity.
+Thousands of small tensors → allocator fragmentation → sudden OOMs at higher res/seq. A slab is contiguous; far fewer device allocations.
+
+Bigger contexts / higher res on the same 24 GB.
+“It runs at 1k tokens / 1024²” is not the same as “it runs with headroom for longer context, larger batch, packed seq, or extra adapters.” Slab shrinks weights so you can spend VRAM on activations (where training actually hurts).
+
+Multi-model workflows.
+If you bounce between WAN / Qwen-Image / Flux variants, slab + index map lets you unmap/remap quickly with predictable peaks. Off-the-shelf checkpoints re-hit the graph build and memory spikes each time.
+
+Profiling reproducibility.
+With slab you get stable weight layout → stable perf numbers across runs. That’s how you catch true kernel regressions instead of loader noise.
+
+Serving & A/B.
+For side-by-side evals, slabs let you pin N variants and just switch views. Off-the-shelf will re-init and repack every time.
 
 ## Contents
 - `src/squareq/slab`: slab metadata/schema helpers
