@@ -202,6 +202,7 @@ python scripts/test_flux_bp8_pipeline.py --mode bp8 --slab-path output/flux1_dev
 ```
 ```
 python scripts/test_flux_bp8_lora_vram.py --height 384 --width 384 --rank 8 --slab-path output/flux1_dev_bp8_all_layers.fpk
+
 ```
 WHY? 
 Deterministic VRAM budget (no surprises).
