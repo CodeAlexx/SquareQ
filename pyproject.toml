@@ -1,16 +1,13 @@
 [project]
 name = "squareq"
-version = "0.1.0"
-description = "Quantized block swapping and BP8 slab tooling for diffusion models"
+version = "0.2.0"
+description = "INT8 quantized linear layers with V2 safetensors slab format"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "AI-Toolkit Contributors" }]
 dependencies = [
     "torch>=2.1",
-    "triton>=2.1",
-    "numpy",
     "safetensors",
-    "tqdm",
 ]
 
 [project.optional-dependencies]
