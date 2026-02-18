@@ -59,8 +59,15 @@ def build_safetensors_slab(
     slab_name: str,
     architecture_id: str = "unknown",
     pack_k: int = 64,
+    include_prefixes: tuple[str, ...] | list[str] | None = None,
 ) -> None:
-    """Quantize all eligible Linear layers and write safetensors + manifest.
+    """Quantize eligible Linear layers and write safetensors + manifest.
+
+    Parameters
+    ----------
+    include_prefixes:
+        If provided, only quantize modules whose name starts with one of
+        these prefixes.  ``None`` (default) quantizes all ``nn.Linear``.
 
     Output files:
         ``{output_dir}/{slab_name}.safetensors``
@@ -78,6 +85,10 @@ def build_safetensors_slab(
 
     for name, module in model.named_modules():
         if not isinstance(module, nn.Linear):
+            continue
+        if include_prefixes is not None and not any(
+            name.startswith(p) for p in include_prefixes
+        ):
             continue
 
         weight = module.weight.data.float()
