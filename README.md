@@ -83,13 +83,29 @@ load_quant_state_from_slab(unet, manifest, "output/sdxl_unet_int8.safetensors")
 # All 743 layers now backed by INT8 buffers — no float weights
 ```
 
-### 3) Run the full E2E validation on SDXL
+### 3) Scaffold for LoRA training
 
-```bash
-python scripts/test_sdxl_int8_e2e.py --output-dir /tmp/sdxl_slab
+```python
+from squareq.scaffold import prepare_model_for_quantized_lora_training
+
+manifest = load_manifest("output/sdxl_unet_int8.manifest.json")
+prepare_model_for_quantized_lora_training(unet, manifest, rank=8, alpha=1.0)
+load_quant_state_from_slab(unet, manifest, "output/sdxl_unet_int8.safetensors")
+# All 743 layers now QuantLinearLoRA: frozen INT8 base + trainable LoRA A/B
 ```
 
-This builds the slab, runs Gate 0 (manifest) and Gate 1 (scaffold) checks, GPU forward pass cosine similarity across all major block groups, LoRA backward pass verification, and prints a summary.
+### 4) Run validation scripts
+
+```bash
+# Build slab + gate checks + per-layer cosine sim + LoRA backward
+python scripts/test_sdxl_int8_e2e.py --output-dir /tmp/sdxl_slab
+
+# Full pipeline inference: BF16 vs INT8 side-by-side image + SSIM
+python scripts/test_sdxl_int8_inference.py --slab-dir /tmp/sdxl_int8_slab
+
+# LoRA training: forward/backward/optimizer steps on quantized UNet
+python scripts/test_sdxl_int8_training.py --slab-dir /tmp/sdxl_int8_slab
+```
 
 ---
 
@@ -148,9 +164,10 @@ Both modules protect INT8 buffers from `.to(dtype=...)` and `_apply()` chains.
 ### Pipeline
 
 ```
-build_safetensors_slab()          -> .safetensors + .manifest.json
-prepare_model_for_quantized_streaming()  -> nn.Linear -> QuantLinear
-load_quant_state_from_slab()      -> populate INT8 buffers from slab
+build_safetensors_slab()                    -> .safetensors + .manifest.json
+prepare_model_for_quantized_streaming()     -> nn.Linear -> QuantLinear (inference)
+prepare_model_for_quantized_lora_training() -> nn.Linear -> QuantLinearLoRA (training)
+load_quant_state_from_slab()                -> populate INT8 buffers from slab
 ```
 
 ---
@@ -185,6 +202,16 @@ pytest serenity/tests/test_squareq_gate*.py -q
 | 13 | Eviction and re-staging stability |
 | 14 | INT8 dtype protection through .to() and _apply() chains |
 | 15 | Telemetry recording, NumericGuard NaN/Inf detection |
+
+---
+
+## Validation Scripts
+
+| Script | What it does |
+|--------|-------------|
+| `test_sdxl_int8_e2e.py` | Build slab, Gate 0/1 checks, per-layer cosine sim, LoRA backward |
+| `test_sdxl_int8_inference.py` | Full SDXL pipeline: BF16 vs INT8 image gen, SSIM/PSNR comparison |
+| `test_sdxl_int8_training.py` | LoRA training loop: scaffold, freeze, forward/backward, verify INT8 frozen |
 
 ---
 
