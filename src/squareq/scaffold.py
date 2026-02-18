@@ -9,9 +9,12 @@ from __future__ import annotations
 from torch import nn
 
 from squareq.manifest import SlabManifestV2
-from squareq.modules import QuantLinear
+from squareq.modules import QuantLinear, QuantLinearLoRA
 
-__all__ = ["prepare_model_for_quantized_streaming"]
+__all__ = [
+    "prepare_model_for_quantized_lora_training",
+    "prepare_model_for_quantized_streaming",
+]
 
 
 def prepare_model_for_quantized_streaming(
@@ -82,6 +85,83 @@ def prepare_model_for_quantized_streaming(
             "in_features": in_features,
             "out_features": out_features,
             "bias": has_bias,
+        }
+
+    return replaced
+
+
+def prepare_model_for_quantized_lora_training(
+    model: nn.Module,
+    manifest: SlabManifestV2,
+    *,
+    rank: int = 8,
+    alpha: float = 1.0,
+) -> dict[str, dict]:
+    """Replace target nn.Linear modules with QuantLinearLoRA for training.
+
+    Same as ``prepare_model_for_quantized_streaming`` but creates
+    ``QuantLinearLoRA`` modules with trainable LoRA A/B parameters
+    on top of frozen INT8 base weights.
+
+    Parameters
+    ----------
+    model:
+        The model to modify in-place.
+    manifest:
+        Loaded slab manifest describing which layers to replace.
+    rank:
+        LoRA rank (dimension of low-rank decomposition).
+    alpha:
+        LoRA scaling factor.
+
+    Returns
+    -------
+    dict:
+        Mapping of ``{module_name: {in_features, out_features, bias, rank}}``
+        for every replaced module.
+    """
+    layer_info: dict[str, dict] = {}
+    for entry in manifest.layers:
+        layer_info[entry["canonical_name"]] = entry
+
+    module_map: dict[str, nn.Module] = dict(model.named_modules())
+
+    replaced: dict[str, dict] = {}
+
+    for name, entry in layer_info.items():
+        current = module_map.get(name)
+        if current is None:
+            continue
+        if isinstance(current, (QuantLinear, QuantLinearLoRA)):
+            continue
+
+        out_features = entry["orig_shape"][0]
+        in_features = entry["orig_shape"][1]
+        has_bias = entry.get("bias_key") is not None
+
+        new_module = QuantLinearLoRA(
+            in_features=in_features,
+            out_features=out_features,
+            rank=rank,
+            alpha=alpha,
+            bias=has_bias,
+        )
+
+        if "." in name:
+            parent_path, attr_name = name.rsplit(".", 1)
+            parent = module_map[parent_path]
+        else:
+            parent = model
+            attr_name = name
+
+        setattr(parent, attr_name, new_module)
+        module_map[name] = new_module
+
+        replaced[name] = {
+            "in_features": in_features,
+            "out_features": out_features,
+            "bias": has_bias,
+            "rank": rank,
         }
 
     return replaced

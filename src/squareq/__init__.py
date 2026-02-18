@@ -14,7 +14,10 @@ from squareq.manifest import (
     validate_manifest_against_safetensors,
 )
 from squareq.modules import QuantLinear, QuantLinearLoRA
-from squareq.scaffold import prepare_model_for_quantized_streaming
+from squareq.scaffold import (
+    prepare_model_for_quantized_lora_training,
+    prepare_model_for_quantized_streaming,
+)
 
 __all__ = [
     "CURRENT_KERNEL_ABI_VERSION",
@@ -29,6 +32,7 @@ __all__ = [
     "load_and_validate_manifest",
     "load_manifest",
     "load_quant_state_from_slab",
+    "prepare_model_for_quantized_lora_training",
     "prepare_model_for_quantized_streaming",
     "validate_manifest_against_safetensors",
 ]

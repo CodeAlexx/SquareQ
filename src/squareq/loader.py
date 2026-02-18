@@ -12,7 +12,7 @@ import torch
 from torch import nn
 
 from squareq.manifest import SlabManifestV2
-from squareq.modules import QuantLinear
+from squareq.modules import QuantLinear, QuantLinearLoRA
 
 __all__ = ["load_quant_state_from_slab"]
 
@@ -58,7 +58,7 @@ def load_quant_state_from_slab(
     for entry in manifest.layers:
         name = entry["canonical_name"]
         module = module_map.get(name)
-        if module is None or not isinstance(module, QuantLinear):
+        if module is None or not isinstance(module, (QuantLinear, QuantLinearLoRA)):
             continue
 
         qweight = tensors[entry["qweight_key"]]
