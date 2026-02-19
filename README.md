@@ -140,6 +140,40 @@ LoRA backward pass:        PASSED (grads on A/B only, no NaN/Inf)
 
 ---
 
+## SDXL INT8 LoRA Training + Inference
+
+SDXL is the first model to complete the full SquareQ pipeline: quantize to INT8 slab, train LoRA on the frozen INT8 base, and run inference with the trained LoRA applied.
+
+<p align="center">
+  <img src="assets/sdxl_int8_lora_inference.png" width="512" />
+</p>
+
+<p align="center"><em>1024x1024 generation from SquareQ INT8 UNet + trained LoRA (Euler, Karras schedule, CFG 4.0)</em></p>
+
+**Training config:**
+
+| Parameter | Value |
+|-----------|-------|
+| Base model | `stabilityai/stable-diffusion-xl-base-1.0` |
+| INT8 slab | 743 layers, 2.25 GB |
+| Training method | LoRA (rank 16, alpha 16) |
+| Resolution | 1024x1024 |
+| Learning rate | 1e-4 |
+| Precision | bfloat16 |
+| Memory strategy | Stagehand block-swapping |
+| LoRA output | 560 target modules, 46.6 MB |
+
+**Inference stats (RTX 3090 Ti):**
+
+| | INT8 UNet | INT8 + LoRA |
+|---|-----------|-------------|
+| Peak VRAM | 7.8 GB | 7.8 GB |
+| Denoise time (20 steps) | 14.2s | 18.3s |
+
+LoRA is applied at inference via forward hooks on each `QuantLinear` module -- no weight merging or dequantization needed.
+
+---
+
 ## Architecture
 
 ### Slab Format (V2)
