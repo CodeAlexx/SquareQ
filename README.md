@@ -247,15 +247,53 @@ Without these fixes, only 32/203 parameters matched. After: 192/203 (remaining 1
 
 ### Building the Flux 2 Dev slab
 
+The standard `build_safetensors_slab()` API requires loading the entire model into RAM to iterate `model.named_modules()`. For Flux 2 Dev that means ~24 GB of bf16 weights in CPU memory just to quantize. On a machine with 32 GB RAM and a 24 GB GPU, that's too tight — the model alone fills RAM, leaving nothing for the quantization buffers and the output slab.
+
+The streaming builder (`scripts/build_flux2dev_slab.py`) solves this by never loading the full model:
+
+1. **Read the sharded index** — `diffusion_pytorch_model.safetensors.index.json` maps each weight key to its shard file
+2. **Open one shard at a time** — `safetensors.safe_open()` memory-maps the shard, no full load
+3. **Quantize one weight at a time** — load a single 2D weight tensor, quantize to INT8 with per-row scales, store the output tensors, immediately `del` the source
+4. **Skip non-Linear weights** — only 2D `.weight` tensors are quantized (biases, norms, embeddings are left out)
+5. **Compute signature without the model** — reads shapes from shard metadata to build the same hash that `compute_model_signature()` would produce from a live `nn.Module`
+6. **Write once** — `safetensors.torch.save_file()` writes all quantized tensors to a single output slab
+
+Peak RAM: ~2 GB (the largest single weight in float32 + its INT8 output + scale/zero_point vectors). This is 12x less than loading the full model.
+
 ```bash
+# From the Serenity repo root:
 python scripts/build_flux2dev_slab.py \
-  --model black-forest-labs/FLUX.2-dev \
-  --output output/squareq_slabs/flux2dev_int8
+  --model-dir ~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots/<hash>/transformer \
+  --output-dir output/squareq_slabs \
+  --slab-name flux2dev_int8 \
+  --pack-k 64
 ```
 
+Arguments:
+- `--model-dir` — path to the transformer subdirectory containing the sharded safetensors + index JSON
+- `--output-dir` — where to write the slab and manifest
+- `--slab-name` — base filename (produces `{name}.safetensors` + `{name}.manifest.json`)
+- `--pack-k` — K-dimension padding alignment for kernel compatibility (default: 64)
+- `--blocks-only` — only quantize `transformer_blocks.*` and `single_transformer_blocks.*` (skip embedders, projections)
+
 Output:
-- `flux2dev_int8.safetensors` — ~30 GB slab, 203 quantized layers
-- `flux2dev_int8.manifest.json` — canonical name → offset/shape/scale mapping
+- `flux2dev_int8.safetensors` — ~30 GB slab, 203 quantized layers (INT8 qweight + FP32 scale + FP32 zero_point per layer)
+- `flux2dev_int8.manifest.json` — per-layer metadata: canonical name, shapes, quant config, model signature
+
+Build time: ~3 minutes on NVMe. The script prints per-layer sizes as it goes:
+
+```
+  transformer_blocks.0.attn.to_q: [3072, 3072] BF16=18MB → INT8=9MB (0.1s)
+  transformer_blocks.0.attn.to_k: [3072, 3072] BF16=18MB → INT8=9MB (0.1s)
+  ...
+  single_transformer_blocks.47.proj_mlp: [12288, 3072] BF16=72MB → INT8=36MB (0.2s)
+
+=== Summary ===
+  Quantized layers: 203
+  Total INT8 weight bytes: 14.72 GB
+```
+
+**Why not use the standard API?** The standard `build_safetensors_slab(model=...)` works fine for models that fit in RAM (SDXL at 4.5 GB, Flux 1 at 22 GB on a 64 GB machine). For Flux 2 Dev on a 32 GB machine, or any model where `model_size + slab_size > available_RAM`, the streaming builder is the only option. The output slab is identical — same format, same manifest schema, same Stagehand integration.
 
 ### Bugs found during integration
 
