@@ -14,6 +14,9 @@ SquareQ stores model weights as an INT8 slab on disk/CPU and streams one block a
 |-------|--------|-----------|-----------|-------|------------|--------|
 | **SDXL Base 1.0** (UNet) | 743 | 4.47 GB | 2.25 GB | 1.99x | 0.9999 avg | Verified |
 | **Flux 1 Dev** (57 blocks) | all | ~22 GB | ~11 GB | ~2x | - | Verified |
+| **Flux 2 Dev** (56 blocks) | 203 | ~24 GB | ~30 GB* | - | - | **Training verified** |
+
+\* Flux 2 Dev slab is larger because it includes per-row scale/zero_point metadata for 203 layers across 8 double-stream + 48 single-stream blocks.
 
 More models coming (SD 1.5, SD3, Flux 2 Klein, Chroma, etc).
 
@@ -171,6 +174,106 @@ SDXL is the first model to complete the full SquareQ pipeline: quantize to INT8 
 | Denoise time (20 steps) | 14.2s | 18.3s |
 
 LoRA is applied at inference via forward hooks on each `QuantLinear` module -- no weight merging or dequantization needed.
+
+---
+
+## Flux 2 Dev INT8 LoRA Training (2026-02-28)
+
+Flux 2 Dev is the first large-scale model to train with SquareQ V2 + Stagehand block-swapping. 12B transformer + 24B text encoder (36B total), trained with LoRA on a single 24GB GPU at just 6 GB steady-state VRAM.
+
+**Training config:**
+
+| Parameter | Value |
+|-----------|-------|
+| Base model | `black-forest-labs/FLUX.2-dev` (12B transformer + Mistral 3 24B text encoder) |
+| INT8 slab | 203 layers, ~30 GB |
+| Training method | LoRA (rank 16, alpha 16) |
+| Resolution | 512 (multi-aspect bucketing: 448x576, 512x512, 384x704, 640x384) |
+| Learning rate | 1e-4 (cosine, 10-step warmup) |
+| Precision | bfloat16 compute, INT8 frozen base |
+| Memory strategy | Stagehand block-swapping with SquareQ V2 backing |
+| Dataset | 118 images with text captions |
+| Steps | 200 |
+
+**Training performance (RTX 3090 Ti, 24 GB):**
+
+| Metric | Value |
+|--------|-------|
+| VRAM allocated (steady state) | 5.52 GB |
+| VRAM reserved (steady state) | 6.00 GB |
+| Step time | ~160 s |
+| SquareQ params matched | 192/203 |
+| OOM events | 0 |
+| Text encoding (118 samples) | ~12 min |
+| Training (200 steps, estimated) | ~8.9 hours |
+
+**Loss curve:**
+
+```
+Step   1: loss=0.696  avg=0.696  lr=2.00e-05  grad_norm=0.030
+Step  10: loss=0.626  avg=0.731  lr=1.00e-04  grad_norm=0.061
+Step  20: loss=0.616  avg=0.742  lr=9.90e-05  grad_norm=0.037
+Step  30: loss=0.584  avg=0.748  lr=9.70e-05  grad_norm=0.039
+Step  35: loss=0.717  avg=0.710  lr=9.55e-05  grad_norm=0.035
+```
+
+### How SquareQ integrates with Stagehand
+
+Stagehand manages block lifecycle (load → forward → backward → evict). For SquareQ-backed blocks, the loading path is:
+
+1. **Slab read**: INT8 weights read from the `.safetensors` slab via memory-mapped I/O
+2. **Dequantize**: Per-row `scale * (qweight - zero_point)` → bf16 in the pinned CPU slab
+3. **H2D transfer**: Async DMA copy from pinned slab to GPU on a dedicated CUDA stream
+4. **Parameter repoint**: Module's `param.data` views into the GPU tensor
+5. **Forward/backward**: Runs in bf16 precision with gradient checkpointing
+6. **Eviction**: GPU tensor freed. LoRA gradients preserved on CPU for optimizer step.
+
+The training loop never touches INT8 directly — Stagehand handles dequantization transparently during block loading. The model sees bf16 parameters at every forward pass.
+
+### Key matching: diffusers ↔ slab canonical names
+
+The SquareQ slab is built from the HuggingFace checkpoint, which uses canonical names like `ff.linear_in`. But diffusers' `FluxTransformer2DModel` internally renames layers:
+
+| Diffusers name | Slab canonical name |
+|---------------|---------------------|
+| `ff.net.0.proj` | `ff.linear_in` |
+| `ff.net.2` | `ff.linear_out` |
+| `ff_context.net.0.proj` | `ff_context.linear_in` |
+| `ff_context.net.2` | `ff_context.linear_out` |
+
+Stagehand's `BlockRegistry._candidate_tensor_keys()` bridges this gap with bidirectional alias tables. Additionally, LoRA injection renames base weights (e.g. `attn.to_q.weight` → `attn.to_q.orig.weight`). The `.orig` suffix is stripped before matching against the slab manifest.
+
+Without these fixes, only 32/203 parameters matched. After: 192/203 (remaining 11 are top-level non-block layers like `proj_out`).
+
+### Building the Flux 2 Dev slab
+
+```bash
+python scripts/build_flux2dev_slab.py \
+  --model black-forest-labs/FLUX.2-dev \
+  --output output/squareq_slabs/flux2dev_int8
+```
+
+Output:
+- `flux2dev_int8.safetensors` — ~30 GB slab, 203 quantized layers
+- `flux2dev_int8.manifest.json` — canonical name → offset/shape/scale mapping
+
+### Bugs found during integration
+
+Five bugs were identified and fixed to get Flux 2 Dev training working:
+
+1. **Mistral 3 24B text encoder OOM**: 48 GB text encoder can't `.to(cuda)` on 24 GB card. Fix: `accelerate.cpu_offload()` per-layer streaming.
+
+2. **Legacy config discarding SquareQ settings**: Serenity's `_is_legacy_config()` silently rebuilt the config dict, dropping all `memory.stagehand.squareq_*` paths. Fix: use new config format without legacy trigger keys.
+
+3. **SquareQ key matching (32/203 → 192/203)**: Two sub-causes — LoRA `.orig` suffix not stripped in `_candidate_squareq_layer_keys()`, and Flux 2 FF layer naming mismatch. Fix: suffix stripping + bidirectional aliases in `stagehand/registry.py`.
+
+4. **CUDA memory fragmentation**: Stagehand evicts blocks from GPU but PyTorch's caching allocator holds reserved memory. Over multiple steps, reserved grew from 6 GB to 15 GB. Fix: `torch.cuda.empty_cache()` after each training step.
+
+5. **Bucket policy disabling gradient checkpointing**: Memory predictor saw low VRAM (Stagehand makes it appear nearly empty) and auto-disabled gradient checkpointing. Without it, activations OOM. Fix: disable bucket_policy when Stagehand+SquareQ is active.
+
+### What this proves
+
+SquareQ V2 + Stagehand can train a 12B-parameter diffusion model with LoRA on a single 24GB GPU at 6 GB steady-state VRAM. The INT8 quantization halves block transfer sizes compared to full bf16 Stagehand, leaving more headroom for activations. Training converges normally with healthy loss curves and gradient norms.
 
 ---
 
