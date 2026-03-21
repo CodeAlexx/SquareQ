@@ -18,7 +18,6 @@ __all__ = [
     "CURRENT_KERNEL_ABI_VERSION",
     "SUPPORTED_QUANT_BITS",
     "SlabManifestV2",
-    "SquareQParamSpec",
     "load_manifest",
     "load_and_validate_manifest",
     "validate_manifest_against_safetensors",
@@ -231,32 +230,19 @@ def validate_manifest_against_safetensors(
     return errors
 
 
-# ── param spec dataclass ──────────────────────────────────────────────────
-
-
-@dataclass
-class SquareQParamSpec:
-    """Descriptor for a parameter sourced from a SquareQ BP8 slab."""
-
-    param_name: str
-    layer_name: str
-    kind: str  # "weight" or "bias"
-    out_features: int
-    in_features: int
-    padded_in_features: int
-
-
 # ── Stagehand integration ─────────────────────────────────────────────────
 
 
 def build_stagehand_param_specs(
     manifest_path: str | Path,
     safetensors_path: str | Path,
-) -> list[SquareQParamSpec]:
+) -> list:
     """Build SquareQParamSpec entries from manifest for Stagehand registry.
 
     Returns a list of ``SquareQParamSpec`` instances.
     """
+    from stagehand.registry import SquareQParamSpec
+
     raw = json.loads(Path(manifest_path).read_text())
     specs: list[SquareQParamSpec] = []
 

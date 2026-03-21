@@ -1,5 +1,7 @@
 """SquareQ — INT8 quantized linear layers with safetensors slab format."""
 
+__version__ = "0.2.0"
+
 from squareq.bridge import get_squareq_v2_layers
 from squareq.builder import build_safetensors_slab
 from squareq.loader import load_quant_state_from_slab
@@ -7,7 +9,6 @@ from squareq.manifest import (
     CURRENT_KERNEL_ABI_VERSION,
     SUPPORTED_QUANT_BITS,
     SlabManifestV2,
-    SquareQParamSpec,
     build_stagehand_param_specs,
     load_and_validate_manifest,
     load_manifest,
@@ -25,7 +26,6 @@ __all__ = [
     "QuantLinear",
     "QuantLinearLoRA",
     "SlabManifestV2",
-    "SquareQParamSpec",
     "build_safetensors_slab",
     "build_stagehand_param_specs",
     "get_squareq_v2_layers",

@@ -148,14 +148,12 @@ ok(f"Loaded INT8 state into {loaded} modules")
 pipe = pipe.to("cuda")
 
 # Verify UNet dtype detection still works (pipeline uses this internally)
-from diffusers.utils import get_parameter_dtype  # type: ignore[attr-defined]
 try:
+    from diffusers.utils import get_parameter_dtype  # type: ignore[attr-defined]
     unet_dtype = get_parameter_dtype(pipe.unet)
-    ok(f"UNet detected dtype: {unet_dtype} (pipeline encode_prompt uses this)")
-except Exception:
-    # Some diffusers versions use a different function
+except (ImportError, AttributeError):
     unet_dtype = next(pipe.unet.parameters()).dtype
-    ok(f"UNet first param dtype: {unet_dtype}")
+ok(f"UNet detected dtype: {unet_dtype} (pipeline encode_prompt uses this)")
 
 # Generate with same seed
 generator = torch.Generator(device="cuda").manual_seed(args.seed)
