@@ -1,38 +1,8 @@
-"""SquareQ — INT8 quantized linear layers with safetensors slab format."""
+"""SquareQ integration — quantized block swapping for Stagehand.
 
-__version__ = "0.2.0"
+Provides INT8 slab format, fused Triton kernel, QuantLinear modules,
+and scaffold preparation for Stagehand-driven streaming.
+"""
+from __future__ import annotations
 
-from squareq.bridge import get_squareq_v2_layers
-from squareq.builder import build_safetensors_slab
-from squareq.loader import load_quant_state_from_slab
-from squareq.manifest import (
-    CURRENT_KERNEL_ABI_VERSION,
-    SUPPORTED_QUANT_BITS,
-    SlabManifestV2,
-    build_stagehand_param_specs,
-    load_and_validate_manifest,
-    load_manifest,
-    validate_manifest_against_safetensors,
-)
-from squareq.modules import QuantLinear, QuantLinearLoRA
-from squareq.scaffold import (
-    prepare_model_for_quantized_lora_training,
-    prepare_model_for_quantized_streaming,
-)
-
-__all__ = [
-    "CURRENT_KERNEL_ABI_VERSION",
-    "SUPPORTED_QUANT_BITS",
-    "QuantLinear",
-    "QuantLinearLoRA",
-    "SlabManifestV2",
-    "build_safetensors_slab",
-    "build_stagehand_param_specs",
-    "get_squareq_v2_layers",
-    "load_and_validate_manifest",
-    "load_manifest",
-    "load_quant_state_from_slab",
-    "prepare_model_for_quantized_lora_training",
-    "prepare_model_for_quantized_streaming",
-    "validate_manifest_against_safetensors",
-]
+__all__: list[str] = []
