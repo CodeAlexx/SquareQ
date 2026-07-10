@@ -6,3 +6,12 @@ and scaffold preparation for Stagehand-driven streaming.
 from __future__ import annotations
 
 __all__: list[str] = []
+
+# INT4 (SVDQuant W4A16) — the 4-bit sibling of the INT8 builder.
+from squareq.svdquant_int4 import (
+    quantize_svdquant_w4a16,
+    reconstruct_w4a16,
+    build_svdquant_int4_slab,
+)
+
+__all__ += ["quantize_svdquant_w4a16", "reconstruct_w4a16", "build_svdquant_int4_slab"]

@@ -28,7 +28,7 @@ __all__ = [
 CURRENT_KERNEL_ABI_VERSION: int = 1
 
 # Quant bit-widths the current kernel can handle.
-SUPPORTED_QUANT_BITS: frozenset[int] = frozenset({8})
+SUPPORTED_QUANT_BITS: frozenset[int] = frozenset({4, 8})  # 4 = SVDQuant W4A16 (svdquant_int4.py)
 
 # dtype string mapping for validation.
 _DTYPE_STR_MAP: dict[str, torch.dtype] = {
