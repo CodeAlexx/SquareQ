@@ -44,6 +44,11 @@ __all__ = [
 NBITS_MAX = 7          # symmetric int4 range [-8,7]; scale = max|.|/7 → max→7
 DEFAULT_RANK = 32
 DEFAULT_GROUP = 64
+# W4A4 uses a fatter low-rank (rank 128) so per-OUTPUT weight int4 (which factors
+# through the stock CUTLASS int4 GEMM, no group kernel) still clears cos ~0.99 on
+# the big-`in` layers. Measured sweep (scripts/svdquant_w4a4_gate.py --sweep):
+# r128 per-out = ff.net.2 0.990, ff.net.0 0.994, audio_ff 0.995. MJ-1099.
+W4A4_DEFAULT_RANK = 128
 
 # Class-A exclusion by name (norms/embedders/modulation/conditioning stay bf16).
 EXCLUDE_SUBSTR = (
@@ -88,6 +93,82 @@ def quantize_svdquant_w4a16(
     lora_up = L1.contiguous().to(torch.bfloat16)                   # [out,R]
     smooth = torch.ones(inh, dtype=torch.bfloat16)
     return qbyte, wscales, lora_down, lora_up, smooth
+
+
+def hadamard(n: int) -> torch.Tensor:
+    """Normalized Sylvester–Hadamard matrix [n,n] (n a power of 2). H @ H.T = I.
+    Data-free QuaRot rotation — the SAME matrix is regenerated online by size, so
+    only a `hadamard: sylvester` flag is stored, never the matrix."""
+    assert n > 0 and (n & (n - 1)) == 0, f"{n} is not a power of two"
+    H = torch.ones(1, 1, dtype=torch.float64)
+    while H.shape[0] < n:
+        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+    return (H / (n ** 0.5))
+
+
+def quantize_svdquant_w4a4(W: torch.Tensor, rank: int = W4A4_DEFAULT_RANK):
+    """W [out,in] → QuaRot W4A4 tensors (per-OUTPUT weight scale, so it factors
+    through the stock CUTLASS int4 GEMM — no group-scale kernel):
+
+        SVD: W ≈ L1@L2 (rank R)  → residual R = W − L1@L2
+        rotate residual: R_rot = R @ H   (H = Sylvester Hadamard [in,in])
+        per-output int4:  ws[o] = max_k|R_rot[o,k]|/7 ; q = round(R_rot/ws)∈[-8,7]
+        pack lo-even: qweight[out,in/2]
+
+    Online (runtime): y = dequant(  (X@H)_int4 @ qweight^T  )·(xscale⊗ws)
+                          + (X @ lora_down) @ lora_up^T  + bias      (low-rank bf16)
+    since (X@H)@(R@H)^T = X@R^T and R = W − L1@L2. Quality (sim, real ff layer):
+    cos ≈ 0.99/layer, outlier-robust. Returns
+    (qbyte I8[out,in/2], wscale BF16[out], lora_down BF16[in,R], lora_up BF16[out,R])."""
+    out, inh = W.shape
+    assert inh > 0 and (inh & (inh - 1)) == 0, f"in {inh} must be a power of 2 for Hadamard"
+    # svd_lowrank (float32) — the rank-R subspace is what matters; full double SVD
+    # is ~100x slower and unneeded for the 1344-layer slab regen (gated: worst
+    # real ff layer cos 0.988 either way).
+    Wf = W.float()
+    q = min(rank + 16, min(out, inh))
+    Ul, Sl, Vl = torch.svd_lowrank(Wf, q=q, niter=6)
+    L1 = (Ul[:, :rank] * Sl[:rank]).double()
+    L2 = Vl[:, :rank].t().double()
+    R = Wf.double() - L1 @ L2
+    H = hadamard(inh)
+    Rrot = R @ H                                    # rotate residual along `in`
+    ws = Rrot.abs().amax(dim=1) / NBITS_MAX         # [out] per-output scale
+    ws = torch.where(ws == 0, torch.ones_like(ws), ws)
+    q = torch.clamp(torch.round(Rrot / ws[:, None]), -8, 7).to(torch.int16)
+    nib = (q & 0xF)
+    lo = nib[:, 0::2]; hi = nib[:, 1::2]
+    qbyte = (lo | (hi << 4)).to(torch.uint8).view(torch.int8)   # I8 [out,in/2]
+    wscale = ws.to(torch.bfloat16)                              # [out]
+    lora_down = L2.t().contiguous().to(torch.bfloat16)          # [in,R]
+    lora_up = L1.contiguous().to(torch.bfloat16)                # [out,R]
+    return qbyte, wscale, lora_down, lora_up
+
+
+def _unpack_int4_perout(qbyte):
+    out = qbyte.shape[0]; inh = qbyte.shape[1] * 2
+    nb = (qbyte.view(torch.uint8).to(torch.int16) & 0xFF)
+    lo = nb & 0xF; hi = (nb >> 4) & 0xF
+    v = torch.zeros(out, inh, dtype=torch.int16)
+    v[:, 0::2] = torch.where(lo >= 8, lo - 16, lo)
+    v[:, 1::2] = torch.where(hi >= 8, hi - 16, hi)
+    return v.double()
+
+
+def w4a4_forward(X, qbyte, wscale, lora_down, lora_up):
+    """Float reference of the exact W4A4 runtime (for gating): per-token act int4
+    on the ROTATED activation, int4 main GEMM, rescale, + bf16 low-rank."""
+    inh = qbyte.shape[1] * 2
+    H = hadamard(inh)
+    Xf = X.double()
+    Xrot = Xf @ H
+    xs = Xrot.abs().amax(dim=1, keepdim=True) / NBITS_MAX
+    xs = torch.where(xs == 0, torch.ones_like(xs), xs)
+    Xq = torch.clamp(torch.round(Xrot / xs), -8, 7)             # int4 activation
+    Rq = _unpack_int4_perout(qbyte)                            # int4 weight (rotated residual)
+    main = (Xq @ Rq.t()) * xs * wscale.double()[None, :]        # int32·(xs⊗ws)
+    low = (Xf @ lora_down.double()) @ lora_up.double().t()      # bf16 low-rank (unrotated)
+    return main + low
 
 
 def reconstruct_w4a16(qbyte, wscales, lora_down, lora_up, group=DEFAULT_GROUP):
