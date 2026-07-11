@@ -196,6 +196,83 @@ def _is_class_a(key, shape, group):
     return inh % group == 0
 
 
+# W4A4 runtime supports these `in` (K) sizes (FWHT shared mem fits ≤48KB).
+W4A4_FWHT_KS = (2048, 4096, 8192)
+
+
+def build_svdquant_w4a4_slab(
+    src: str, out: str, *, key_prefix: str = "",
+    rank: int = W4A4_DEFAULT_RANK, group: int = DEFAULT_GROUP, sample: int = 8,
+):
+    """Quantize a DiT to a HYBRID W4A4 slab: class-A linears with in∈{2048,4096,
+    8192} → QuaRot W4A4 (per-out int4 of the Hadamard-rotated residual, rank R);
+    in=16384 (and non-power-of-2 in) → W4A16 group-64 (the FWHT shared-mem blocker,
+    48 ff.net.2 layers). Non-class-A pass through verbatim. The manifest tags each
+    quantized layer 'w4a4'|'w4a16' so the Mojo block dispatch knows. Returns manifest."""
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    torch.set_grad_enabled(False)
+    f = safe_open(src, "pt")
+    keys = list(f.keys())
+    tensors: dict = {}
+    manifest = {"method": "svdquant_w4a4_hybrid", "rank": rank, "w4a16_rank": DEFAULT_RANK,
+                "group": group, "hadamard": "sylvester", "layers": {}, "passthrough": []}
+    cos4 = []
+    n4 = n16 = pn = 0
+    for k in keys:
+        shape = list(f.get_slice(k).get_shape())
+        in_scope = k.startswith(key_prefix) if key_prefix else True
+        if in_scope and _is_class_a(k, shape, group):
+            W = f.get_tensor(k)
+            out_f, in_f = W.shape
+            base = k[:-len(".weight")]
+            is_pow2 = (in_f & (in_f - 1)) == 0
+            if is_pow2 and in_f in W4A4_FWHT_KS:
+                qb, ws, ld, lu = quantize_svdquant_w4a4(W, rank)
+                tensors[base + ".qweight"] = qb          # I8 [out,in/2] (per-out, rotated)
+                tensors[base + ".wscale"] = ws           # bf16 [out]
+                tensors[base + ".lora_down"] = ld        # bf16 [in,R]
+                tensors[base + ".lora_up"] = lu          # bf16 [out,R]
+                if (base + ".bias") in keys:
+                    tensors[base + ".bias"] = f.get_tensor(base + ".bias").to(torch.bfloat16)
+                manifest["layers"][k] = {"kind": "w4a4", "in": in_f, "out": out_f, "rank": rank}
+                n4 += 1
+                if len(cos4) < sample:
+                    from .svdquant_int4 import w4a4_forward
+                    X = torch.randn(64, in_f)
+                    a = w4a4_forward(X, qb, ws, ld, lu).flatten()
+                    b = (X.double() @ W.double().t()).flatten()
+                    cos4.append((a @ b / (a.norm() * b.norm())).item())
+            else:
+                qb, wsc, ld, lu, sm = quantize_svdquant_w4a16(W, DEFAULT_RANK, group, full_svd=False)
+                tensors[base + ".qweight"] = qb          # I8 [out,in/2] (group-64)
+                tensors[base + ".wscales"] = wsc         # bf16 [in/G,out]
+                tensors[base + ".lora_down"] = ld
+                tensors[base + ".lora_up"] = lu
+                tensors[base + ".smooth"] = sm
+                if (base + ".bias") in keys:
+                    tensors[base + ".bias"] = f.get_tensor(base + ".bias").to(torch.bfloat16)
+                manifest["layers"][k] = {"kind": "w4a16", "in": in_f, "out": out_f, "rank": DEFAULT_RANK}
+                n16 += 1
+        else:
+            t = f.get_tensor(k)
+            tensors[k] = t.to(torch.bfloat16) if t.dtype in (
+                torch.float32, torch.bfloat16, torch.float16) else t
+            manifest["passthrough"].append(k)
+            pn += 1
+    if cos4:
+        ct = torch.tensor(cos4)
+        manifest["sample_w4a4_cos"] = {"mean": ct.mean().item(), "min": ct.min().item()}
+    manifest["w4a4_count"] = n4
+    manifest["w4a16_count"] = n16
+    manifest["passthrough_count"] = pn
+    save_file(tensors, out, metadata={"svdquant_manifest": json.dumps(manifest)})
+    Path(out).with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2))
+    manifest["slab_bytes"] = os.path.getsize(out)
+    return manifest
+
+
 def build_svdquant_int4_slab(
     src: str, out: str, *, key_prefix: str = "",
     rank: int = DEFAULT_RANK, group: int = DEFAULT_GROUP,
