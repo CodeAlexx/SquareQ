@@ -426,12 +426,47 @@ W = lora_up @ lora_down^T  +  inverse_H256( dequant( residual ) )
   the builder is streaming + restartable (kill -9 mid-build resumes to
   byte-identical output).
 
-### Measured results (same seeds, same data, 2026-07-28)
+### Measured results — pure-Mojo runtime, RTX 5080 16 GB (same seeds/data, 2026-07-28)
 
-| model | config | vs fp8_e4m3 baseline |
-|---|---|---|
-| FLUX.2 Klein-4B, 512px, 300 steps | int4 g32+MSE, 0.294x bytes | loss +0.43% rel; VRAM 5.5 vs 7.0 GB |
-| Krea-2 Raw (22B-class), 1024px, 200 steps | int4 g32+MSE, 0.290x bytes | **loss +0.18%; 6.0 vs 6.8 s/step; all 28 blocks resident where fp8 OOMs above 14** |
+**FLUX.2 Klein-4B LoRA, 512px, 300 steps** (rank-16, AdamW, inline 1024px samples):
+
+| arm | bytes | mean loss vs bf16 | s/step | peak VRAM |
+|---|---|---|---|---|
+| bf16 streamed | 1.0x | — | 1.162 | 3.61 GB |
+| fp8_e4m3 resident | 0.50x | +0.0005 | 1.089 | 7.04 GB |
+| **SquareQ int4 g32+MSE** | **0.294x** | **+0.0048** | 1.297 | **5.52 GB** |
+
+Loss curves are parallel (constant level-offset, no divergence); step-300
+1024x1024 samples are clean.
+
+**Krea-2 Raw (22B-class) LoRA, 1024px, 200 steps** — the memory-bound case:
+
+| arm | residency on 16 GB | mean loss | s/step | peak VRAM |
+|---|---|---|---|---|
+| fp8_e4m3 | 28-resident: **OOM**. 22: **OOM**. max 14 + disk-stream | 0.1667 | 6.84 | 8.16 GB |
+| **SquareQ int4 g32+MSE** | **all 28 blocks resident, zero disk reads** | 0.1669 (**+0.18%**) | **6.02** | 9.13 GB |
+
+The larger the model, the smaller the W4 penalty (+0.64% rel on 4B ->
++0.18% on 22B-class) — and the residency win turns into a speed win.
+
+**Native NVFP4 GEMM (Blackwell sm_120, cuBLASLt block-scaled)** vs the
+production bf16 GEMM at model shapes:
+
+| M x N x K | bf16 | fp4 | speedup |
+|---|---|---|---|
+| 1536 x 3072 x 3072 | 271 us | 45 us | 6.1x |
+| 1536 x 9216 x 3072 | 837 us | 125 us | 6.7x |
+| 4480 x 6144 x 6144 | 2973 us | 418 us | 7.1x |
+| 4480 x 16384 x 6144 | 7930 us | 1074 us | 7.4x |
+| 4480 x 6144 x 16384 | 7522 us | 1023 us | 7.4x |
+
+Op-level parity of the full FP4 forward (fused H256-rotate + block-quant +
+tiled scales + GEMM + epilogue): cos 0.99987 vs the bit-level oracle; the
+bwd-side bf16 reconstruct from the same payload: cos 0.999994.
+
+**Builder** (streaming, restartable): Klein-4B 7.3 GB -> 2.3 GB slab in 92 s
+at 5.3 GB peak RSS; `kill -9` mid-build resumes to byte-identical output.
+Krea-2 29 GB-class in 6 min at 8.1 GB RSS.
 
 Weight-fidelity vs a public ConvRot INT8 checkpoint of the same base
 (`lilcheaty/Krea2-INT8-ConvRot`, 0.49x bytes): int8 wins per-layer cosine
