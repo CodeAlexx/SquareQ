@@ -403,3 +403,57 @@ pytest serenity/tests/test_squareq_gate*.py -q
 ## License
 
 TBD by repository owner.
+
+---
+
+# SquareQ v3 — W4 (Hadamard-256 + low-rank + int4 / NVFP4)
+
+v3 moves from INT8 block-swapping to a **4-bit quantized-frozen-base training
+format** at ~0.29x bf16 bytes, with the error-recovery branch inside the format:
+
+```
+W = lora_up @ lora_down^T  +  inverse_H256( dequant( residual ) )
+```
+
+- **Rotation**: block-diagonal normalized Hadamard-256 over the input dim
+  (any K % 256 == 0 — covers FLUX.2 Klein, Krea-2, and friends).
+- **Residual codecs**: `int4` group-32/64 scales with MSE-swept fractions
+  (dequant-first, any GPU), or `nvfp4` (e2m1 + ue4m3 block-16 scales in the
+  cuBLASLt tiled layout + per-tensor global scale) for native FP4 tensor-core
+  GEMMs on Blackwell (measured 6.1–7.4x vs bf16 at model shapes on an RTX 5080).
+- **Low-rank branch**: rank-32 SVD of the weight, always on, bf16.
+- **One artifact**: the same slab trains (frozen base + LoRA) and infers;
+  the builder is streaming + restartable (kill -9 mid-build resumes to
+  byte-identical output).
+
+### Measured results (same seeds, same data, 2026-07-28)
+
+| model | config | vs fp8_e4m3 baseline |
+|---|---|---|
+| FLUX.2 Klein-4B, 512px, 300 steps | int4 g32+MSE, 0.294x bytes | loss +0.43% rel; VRAM 5.5 vs 7.0 GB |
+| Krea-2 Raw (22B-class), 1024px, 200 steps | int4 g32+MSE, 0.290x bytes | **loss +0.18%; 6.0 vs 6.8 s/step; all 28 blocks resident where fp8 OOMs above 14** |
+
+Weight-fidelity vs a public ConvRot INT8 checkpoint of the same base
+(`lilcheaty/Krea2-INT8-ConvRot`, 0.49x bytes): int8 wins per-layer cosine
+(0.99996 vs our 0.9964–0.9990) at 1.7x our footprint — 8 bits vs 4 bits.
+SquareQ's class is the 0.29x row: full-model residency where int8 cannot fit.
+
+### Layout: `src/squareq/v3/`
+`core.py` (codecs + Hadamard + SVD init + NVFP4 tiled scale packer),
+`build_slab.py` (streaming restartable builder CLI), `stwriter.py`
+(streaming safetensors writer), `plan.py` (manifest/build-state),
+`reference.py` (pure-torch runtime: `SquareQLinear`, `SquareQLoRALinear`,
+`lora_train_demo` — verify every claim without the Mojo stack),
+`selftest.py` (gates: pack/unpack bit-exact, rotation self-inverse,
+determinism, NVFP4 round-trip; `--klein <ckpt>` adds real-weight checks).
+
+```bash
+python -m squareq.v3.selftest
+python -m squareq.v3.build_slab --model klein4b --src transformer.safetensors \
+    --out-dir klein4b_squareq --rank 32 --group 32          # int4 (any GPU)
+python -m squareq.v3.build_slab ... --format nvfp4          # Blackwell FP4
+```
+
+The production training/inference runtime (pure Mojo: fused kernels, resident
+block streaming, the trainers these numbers come from) lives in
+[CodeAlexx/mojodiffusion](https://github.com/CodeAlexx/mojodiffusion).
