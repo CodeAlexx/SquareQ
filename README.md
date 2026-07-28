@@ -464,6 +464,14 @@ Op-level parity of the full FP4 forward (fused H256-rotate + block-quant +
 tiled scales + GEMM + epilogue): cos 0.99987 vs the bit-level oracle; the
 bwd-side bf16 reconstruct from the same payload: cos 0.999994.
 
+End-to-end: the Klein-4B trainer runs with `quantized_resident=squareq_nvfp4`
+(native FP4 forward, bf16-reconstruct backward from the same payload) — loss
+matches the int4 arm within 2% over the smoke, and an nsys trace shows the
+cutlass sm120 block-scaled ue4m3xe2m1 GEMM executing (no silent bf16
+fallback). v1 step time equals the int4 arm (the forward currently also
+reconstructs the bf16 weight for the backward; skipping that on
+forward-only visits is the next recorded optimization).
+
 **Builder** (streaming, restartable): Klein-4B 7.3 GB -> 2.3 GB slab in 92 s
 at 5.3 GB peak RSS; `kill -9` mid-build resumes to byte-identical output.
 Krea-2 29 GB-class in 6 min at 8.1 GB RSS.
