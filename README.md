@@ -97,6 +97,24 @@ python -m squareq.v3.build_slab --model klein4b --src transformer.safetensors \
 python -m squareq.v3.build_slab ... --format nvfp4          # Blackwell FP4
 ```
 
+### v3.1 — int8-residual mode: taking the 0.5x point too
+
+`--format int8`: int8 per-row (MSE-swept) of the H256-rotated rank-16 residual
++ the low-rank branch. Measured from REAL slab bytes on the same Krea-2 weights
+vs the public ConvRot INT8 checkpoint (`lilcheaty/Krea2-INT8-ConvRot`):
+
+| layer | ConvRot int8 @0.5003x | SquareQ w8 @0.505x |
+|---|---|---|
+| blocks.0.attn.wq | 0.999958 | **0.999984** |
+| blocks.0.mlp.down | 0.999955 | **0.999961** |
+| blocks.13.mlp.down | 0.999956 | **0.999959** |
+| blocks.27.mlp.gate | 0.999960 | **0.999965** |
+
+Full krea2 slab: cos_w min 0.99990 / mean 0.99996 over 224 layers. Trains in
+the same Mojo pipeline (Klein-4B smoke losses statistically identical to the
+fp8 arm), same restartable builder, same one-artifact contract. Bytes are
+0.9% above theirs (the low-rank branch) — disclosed.
+
 ### Cross-stack comparison vs SimpleTuner v4.5.2 + SDNQ (int8-sdnq + Hadamard-256)
 
 Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
