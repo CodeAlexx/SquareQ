@@ -68,9 +68,13 @@ End-to-end: the Klein-4B trainer runs with `quantized_resident=squareq_nvfp4`
 (native FP4 forward, bf16-reconstruct backward from the same payload) — loss
 matches the int4 arm within 2% over the smoke, and an nsys trace shows the
 cutlass sm120 block-scaled ue4m3xe2m1 GEMM executing (no silent bf16
-fallback). v1 step time equals the int4 arm (the forward currently also
-reconstructs the bf16 weight for the backward; skipping that on
-forward-only visits is the next recorded optimization).
+fallback). Forward-only visits now skip the bf16 reconstruct entirely
+(the FP4 payload drives the GEMM; only the backward rebuilds bf16):
+measured forward -43%, step time 0.864 -> 0.785 s/step vs the int4 arm,
+loss curve unchanged. Sensitive layers (AdaLN/modulation/norms) are kept
+bf16 by an explicit, reported builder policy — and per-layer weight
+fidelity in squareq-plan.json is a proxy, not a verdict: judge damage by
+training curves and samples, which is how every number here was gated.
 
 **Builder** (streaming, restartable): Klein-4B 7.3 GB -> 2.3 GB slab in 92 s
 at 5.3 GB peak RSS; `kill -9` mid-build resumes to byte-identical output.
