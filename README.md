@@ -125,10 +125,16 @@ Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
 512px, 300 steps, FLUX.2 Klein-4B. Each quantized arm judged vs ITS OWN bf16
 (cross-stack loss scales differ).
 
-| stack | quant arm | bytes | s/step | quant-vs-own-bf16 loss |
+| stack | quant arm | bytes | s/step (pure training) | quant-vs-own-bf16 loss |
 |---|---|---|---|---|
 | SimpleTuner (torch) | int8-sdnq+H256, dequant-first* | 0.50x | 0.917 (bf16: 0.676) | -0.39% (noise: int8 is ~lossless) |
-| SquareQ (Mojo) | int4 g32+MSE | **0.294x** | 1.373 (bf16: 1.162) | +0.63% |
+| SquareQ (Mojo) | int4 g32+MSE | **0.294x** | **0.859** (fp8 base: 0.695; NVFP4 fwd: 0.785) | +0.63% |
+
+CORRECTION (2026-07-28): an earlier revision listed SquareQ at 1.373 s/step —
+that number included inline 1024x1024 sampling every 100 steps inside the
+measured window; the SimpleTuner rates did not. Matched windows (training
+steps only, above): SquareQ's quantized arm is FASTER than SimpleTuner's
+(0.859 vs 0.917), and its fp8 arm matches their bf16 (0.695 vs 0.676).
 
 *Their quantized-matmul ConvRot preset (compiled and uncompiled) failed on
 current Triton ("Kernel requires a runtime memory allocation, but no
