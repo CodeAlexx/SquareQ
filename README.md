@@ -119,6 +119,15 @@ the same Mojo pipeline (Klein-4B smoke losses statistically identical to the
 fp8 arm), same restartable builder, same one-artifact contract. Bytes are
 0.9% above theirs (the low-rank branch) — disclosed.
 
+### Third model family: LTX-2 (22B) — fully resident on 16 GB
+
+The LTX-2.3 22B distilled DiT (42 GB bf16) quantizes to an 11.1 GB SquareQ
+slab (1344 linears, cos_w min 0.99641 / mean 0.99715 — the highest fidelity
+of any model tested, large models absorb W4 best) and trains with **all 48
+transformer blocks resident** on an RTX 5080: 10-step LoRA smoke, loss
+decreasing, adapters moving, zero per-step disk reads. Same builder, same
+format, same loader path as Klein and Krea-2.
+
 ### Cross-stack comparison vs SimpleTuner v4.5.2 + SDNQ (int8-sdnq + Hadamard-256)
 
 Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
