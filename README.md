@@ -497,6 +497,27 @@ python -m squareq.v3.build_slab --model klein4b --src transformer.safetensors \
 python -m squareq.v3.build_slab ... --format nvfp4          # Blackwell FP4
 ```
 
+### Cross-stack comparison vs SimpleTuner v4.5.2 + SDNQ (int8-sdnq + Hadamard-256)
+
+Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
+512px, 300 steps, FLUX.2 Klein-4B. Each quantized arm judged vs ITS OWN bf16
+(cross-stack loss scales differ).
+
+| stack | quant arm | bytes | s/step | quant-vs-own-bf16 loss |
+|---|---|---|---|---|
+| SimpleTuner (torch) | int8-sdnq+H256, dequant-first* | 0.50x | 0.917 (bf16: 0.676) | -0.39% (noise: int8 is ~lossless) |
+| SquareQ (Mojo) | int4 g32+MSE | **0.294x** | 1.373 (bf16: 1.162) | +0.63% |
+
+*Their quantized-matmul ConvRot preset (compiled and uncompiled) failed on
+current Triton ("Kernel requires a runtime memory allocation, but no
+allocator was set"); the documented dequant-first int8+H256 route ran.
+
+Honest reading, both directions: int8 at 0.5x is effectively lossless and the
+torch stack is absolutely faster at this small-model scale. SquareQ's case is
+the 0.29x byte class (no competing offering) and large-model residency —
+Krea-2 at 1024px trains fully resident and FASTER than fp8 on a 16 GB card,
+a configuration neither fp8 nor 0.5x int8 bases can fit.
+
 The production training/inference runtime (pure Mojo: fused kernels, resident
 block streaming, the trainers these numbers come from) lives in
 [CodeAlexx/mojodiffusion](https://github.com/CodeAlexx/mojodiffusion).
