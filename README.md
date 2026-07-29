@@ -1,4 +1,131 @@
-# SQUARE-Q
+# SquareQ
+
+Quantized-frozen-base training for diffusion models on consumer GPUs.
+Newest first: **v3** (W4/NVFP4, Mojo runtime + torch reference) is the
+current line; **v2** (INT8 block-swapping, PyTorch) remains supported below.
+
+---
+
+# SquareQ v3 — W4 (Hadamard-256 + low-rank + int4 / NVFP4)
+
+v3 moves from INT8 block-swapping to a **4-bit quantized-frozen-base training
+format** at ~0.29x bf16 bytes, with the error-recovery branch inside the format:
+
+```
+W = lora_up @ lora_down^T  +  inverse_H256( dequant( residual ) )
+```
+
+- **Rotation**: block-diagonal normalized Hadamard-256 over the input dim
+  (any K % 256 == 0 — covers FLUX.2 Klein, Krea-2, and friends).
+- **Residual codecs**: `int4` group-32/64 scales with MSE-swept fractions
+  (dequant-first, any GPU), or `nvfp4` (e2m1 + ue4m3 block-16 scales in the
+  cuBLASLt tiled layout + per-tensor global scale) for native FP4 tensor-core
+  GEMMs on Blackwell (measured 6.1–7.4x vs bf16 at model shapes on an RTX 5080).
+- **Low-rank branch**: rank-32 SVD of the weight, always on, bf16.
+- **One artifact**: the same slab trains (frozen base + LoRA) and infers;
+  the builder is streaming + restartable (kill -9 mid-build resumes to
+  byte-identical output).
+
+### Measured results — pure-Mojo runtime, RTX 5080 16 GB (same seeds/data, 2026-07-28)
+
+**FLUX.2 Klein-4B LoRA, 512px, 300 steps** (rank-16, AdamW, inline 1024px samples):
+
+| arm | bytes | mean loss vs bf16 | s/step | peak VRAM |
+|---|---|---|---|---|
+| bf16 streamed | 1.0x | — | 1.162 | 3.61 GB |
+| fp8_e4m3 resident | 0.50x | +0.0005 | 1.089 | 7.04 GB |
+| **SquareQ int4 g32+MSE** | **0.294x** | **+0.0048** | 1.297 | **5.52 GB** |
+
+Loss curves are parallel (constant level-offset, no divergence); step-300
+1024x1024 samples are clean.
+
+**Krea-2 Raw (22B-class) LoRA, 1024px, 200 steps** — the memory-bound case:
+
+| arm | residency on 16 GB | mean loss | s/step | peak VRAM |
+|---|---|---|---|---|
+| fp8_e4m3 | 28-resident: **OOM**. 22: **OOM**. max 14 + disk-stream | 0.1667 | 6.84 | 8.16 GB |
+| **SquareQ int4 g32+MSE** | **all 28 blocks resident, zero disk reads** | 0.1669 (**+0.18%**) | **6.02** | 9.13 GB |
+
+The larger the model, the smaller the W4 penalty (+0.64% rel on 4B ->
++0.18% on 22B-class) — and the residency win turns into a speed win.
+
+**Native NVFP4 GEMM (Blackwell sm_120, cuBLASLt block-scaled)** vs the
+production bf16 GEMM at model shapes:
+
+| M x N x K | bf16 | fp4 | speedup |
+|---|---|---|---|
+| 1536 x 3072 x 3072 | 271 us | 45 us | 6.1x |
+| 1536 x 9216 x 3072 | 837 us | 125 us | 6.7x |
+| 4480 x 6144 x 6144 | 2973 us | 418 us | 7.1x |
+| 4480 x 16384 x 6144 | 7930 us | 1074 us | 7.4x |
+| 4480 x 6144 x 16384 | 7522 us | 1023 us | 7.4x |
+
+Op-level parity of the full FP4 forward (fused H256-rotate + block-quant +
+tiled scales + GEMM + epilogue): cos 0.99987 vs the bit-level oracle; the
+bwd-side bf16 reconstruct from the same payload: cos 0.999994.
+
+End-to-end: the Klein-4B trainer runs with `quantized_resident=squareq_nvfp4`
+(native FP4 forward, bf16-reconstruct backward from the same payload) — loss
+matches the int4 arm within 2% over the smoke, and an nsys trace shows the
+cutlass sm120 block-scaled ue4m3xe2m1 GEMM executing (no silent bf16
+fallback). v1 step time equals the int4 arm (the forward currently also
+reconstructs the bf16 weight for the backward; skipping that on
+forward-only visits is the next recorded optimization).
+
+**Builder** (streaming, restartable): Klein-4B 7.3 GB -> 2.3 GB slab in 92 s
+at 5.3 GB peak RSS; `kill -9` mid-build resumes to byte-identical output.
+Krea-2 29 GB-class in 6 min at 8.1 GB RSS.
+
+Weight-fidelity vs a public ConvRot INT8 checkpoint of the same base
+(`lilcheaty/Krea2-INT8-ConvRot`, 0.49x bytes): int8 wins per-layer cosine
+(0.99996 vs our 0.9964–0.9990) at 1.7x our footprint — 8 bits vs 4 bits.
+SquareQ's class is the 0.29x row: full-model residency where int8 cannot fit.
+
+### Layout: `src/squareq/v3/`
+`core.py` (codecs + Hadamard + SVD init + NVFP4 tiled scale packer),
+`build_slab.py` (streaming restartable builder CLI), `stwriter.py`
+(streaming safetensors writer), `plan.py` (manifest/build-state),
+`reference.py` (pure-torch runtime: `SquareQLinear`, `SquareQLoRALinear`,
+`lora_train_demo` — verify every claim without the Mojo stack),
+`selftest.py` (gates: pack/unpack bit-exact, rotation self-inverse,
+determinism, NVFP4 round-trip; `--klein <ckpt>` adds real-weight checks).
+
+```bash
+python -m squareq.v3.selftest
+python -m squareq.v3.build_slab --model klein4b --src transformer.safetensors \
+    --out-dir klein4b_squareq --rank 32 --group 32          # int4 (any GPU)
+python -m squareq.v3.build_slab ... --format nvfp4          # Blackwell FP4
+```
+
+### Cross-stack comparison vs SimpleTuner v4.5.2 + SDNQ (int8-sdnq + Hadamard-256)
+
+Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
+512px, 300 steps, FLUX.2 Klein-4B. Each quantized arm judged vs ITS OWN bf16
+(cross-stack loss scales differ).
+
+| stack | quant arm | bytes | s/step | quant-vs-own-bf16 loss |
+|---|---|---|---|---|
+| SimpleTuner (torch) | int8-sdnq+H256, dequant-first* | 0.50x | 0.917 (bf16: 0.676) | -0.39% (noise: int8 is ~lossless) |
+| SquareQ (Mojo) | int4 g32+MSE | **0.294x** | 1.373 (bf16: 1.162) | +0.63% |
+
+*Their quantized-matmul ConvRot preset (compiled and uncompiled) failed on
+current Triton ("Kernel requires a runtime memory allocation, but no
+allocator was set"); the documented dequant-first int8+H256 route ran.
+
+Honest reading, both directions: int8 at 0.5x is effectively lossless and the
+torch stack is absolutely faster at this small-model scale. SquareQ's case is
+the 0.29x byte class (no competing offering) and large-model residency —
+Krea-2 at 1024px trains fully resident and FASTER than fp8 on a 16 GB card,
+a configuration neither fp8 nor 0.5x int8 bases can fit.
+
+The production training/inference runtime (pure Mojo: fused kernels, resident
+block streaming, the trainers these numbers come from) lives in
+[CodeAlexx/mojodiffusion](https://github.com/CodeAlexx/mojodiffusion).
+
+
+---
+
+# SquareQ v2 — INT8 block-swapping (PyTorch)
 
 INT8 quantized block-swapping for diffusion model training on consumer GPUs.
 
@@ -403,121 +530,3 @@ pytest serenity/tests/test_squareq_gate*.py -q
 ## License
 
 TBD by repository owner.
-
----
-
-# SquareQ v3 — W4 (Hadamard-256 + low-rank + int4 / NVFP4)
-
-v3 moves from INT8 block-swapping to a **4-bit quantized-frozen-base training
-format** at ~0.29x bf16 bytes, with the error-recovery branch inside the format:
-
-```
-W = lora_up @ lora_down^T  +  inverse_H256( dequant( residual ) )
-```
-
-- **Rotation**: block-diagonal normalized Hadamard-256 over the input dim
-  (any K % 256 == 0 — covers FLUX.2 Klein, Krea-2, and friends).
-- **Residual codecs**: `int4` group-32/64 scales with MSE-swept fractions
-  (dequant-first, any GPU), or `nvfp4` (e2m1 + ue4m3 block-16 scales in the
-  cuBLASLt tiled layout + per-tensor global scale) for native FP4 tensor-core
-  GEMMs on Blackwell (measured 6.1–7.4x vs bf16 at model shapes on an RTX 5080).
-- **Low-rank branch**: rank-32 SVD of the weight, always on, bf16.
-- **One artifact**: the same slab trains (frozen base + LoRA) and infers;
-  the builder is streaming + restartable (kill -9 mid-build resumes to
-  byte-identical output).
-
-### Measured results — pure-Mojo runtime, RTX 5080 16 GB (same seeds/data, 2026-07-28)
-
-**FLUX.2 Klein-4B LoRA, 512px, 300 steps** (rank-16, AdamW, inline 1024px samples):
-
-| arm | bytes | mean loss vs bf16 | s/step | peak VRAM |
-|---|---|---|---|---|
-| bf16 streamed | 1.0x | — | 1.162 | 3.61 GB |
-| fp8_e4m3 resident | 0.50x | +0.0005 | 1.089 | 7.04 GB |
-| **SquareQ int4 g32+MSE** | **0.294x** | **+0.0048** | 1.297 | **5.52 GB** |
-
-Loss curves are parallel (constant level-offset, no divergence); step-300
-1024x1024 samples are clean.
-
-**Krea-2 Raw (22B-class) LoRA, 1024px, 200 steps** — the memory-bound case:
-
-| arm | residency on 16 GB | mean loss | s/step | peak VRAM |
-|---|---|---|---|---|
-| fp8_e4m3 | 28-resident: **OOM**. 22: **OOM**. max 14 + disk-stream | 0.1667 | 6.84 | 8.16 GB |
-| **SquareQ int4 g32+MSE** | **all 28 blocks resident, zero disk reads** | 0.1669 (**+0.18%**) | **6.02** | 9.13 GB |
-
-The larger the model, the smaller the W4 penalty (+0.64% rel on 4B ->
-+0.18% on 22B-class) — and the residency win turns into a speed win.
-
-**Native NVFP4 GEMM (Blackwell sm_120, cuBLASLt block-scaled)** vs the
-production bf16 GEMM at model shapes:
-
-| M x N x K | bf16 | fp4 | speedup |
-|---|---|---|---|
-| 1536 x 3072 x 3072 | 271 us | 45 us | 6.1x |
-| 1536 x 9216 x 3072 | 837 us | 125 us | 6.7x |
-| 4480 x 6144 x 6144 | 2973 us | 418 us | 7.1x |
-| 4480 x 16384 x 6144 | 7930 us | 1074 us | 7.4x |
-| 4480 x 6144 x 16384 | 7522 us | 1023 us | 7.4x |
-
-Op-level parity of the full FP4 forward (fused H256-rotate + block-quant +
-tiled scales + GEMM + epilogue): cos 0.99987 vs the bit-level oracle; the
-bwd-side bf16 reconstruct from the same payload: cos 0.999994.
-
-End-to-end: the Klein-4B trainer runs with `quantized_resident=squareq_nvfp4`
-(native FP4 forward, bf16-reconstruct backward from the same payload) — loss
-matches the int4 arm within 2% over the smoke, and an nsys trace shows the
-cutlass sm120 block-scaled ue4m3xe2m1 GEMM executing (no silent bf16
-fallback). v1 step time equals the int4 arm (the forward currently also
-reconstructs the bf16 weight for the backward; skipping that on
-forward-only visits is the next recorded optimization).
-
-**Builder** (streaming, restartable): Klein-4B 7.3 GB -> 2.3 GB slab in 92 s
-at 5.3 GB peak RSS; `kill -9` mid-build resumes to byte-identical output.
-Krea-2 29 GB-class in 6 min at 8.1 GB RSS.
-
-Weight-fidelity vs a public ConvRot INT8 checkpoint of the same base
-(`lilcheaty/Krea2-INT8-ConvRot`, 0.49x bytes): int8 wins per-layer cosine
-(0.99996 vs our 0.9964–0.9990) at 1.7x our footprint — 8 bits vs 4 bits.
-SquareQ's class is the 0.29x row: full-model residency where int8 cannot fit.
-
-### Layout: `src/squareq/v3/`
-`core.py` (codecs + Hadamard + SVD init + NVFP4 tiled scale packer),
-`build_slab.py` (streaming restartable builder CLI), `stwriter.py`
-(streaming safetensors writer), `plan.py` (manifest/build-state),
-`reference.py` (pure-torch runtime: `SquareQLinear`, `SquareQLoRALinear`,
-`lora_train_demo` — verify every claim without the Mojo stack),
-`selftest.py` (gates: pack/unpack bit-exact, rotation self-inverse,
-determinism, NVFP4 round-trip; `--klein <ckpt>` adds real-weight checks).
-
-```bash
-python -m squareq.v3.selftest
-python -m squareq.v3.build_slab --model klein4b --src transformer.safetensors \
-    --out-dir klein4b_squareq --rank 32 --group 32          # int4 (any GPU)
-python -m squareq.v3.build_slab ... --format nvfp4          # Blackwell FP4
-```
-
-### Cross-stack comparison vs SimpleTuner v4.5.2 + SDNQ (int8-sdnq + Hadamard-256)
-
-Same dataset (51-image identity set), seed 42, rank-16/a16, lr 3e-5, bs 1,
-512px, 300 steps, FLUX.2 Klein-4B. Each quantized arm judged vs ITS OWN bf16
-(cross-stack loss scales differ).
-
-| stack | quant arm | bytes | s/step | quant-vs-own-bf16 loss |
-|---|---|---|---|---|
-| SimpleTuner (torch) | int8-sdnq+H256, dequant-first* | 0.50x | 0.917 (bf16: 0.676) | -0.39% (noise: int8 is ~lossless) |
-| SquareQ (Mojo) | int4 g32+MSE | **0.294x** | 1.373 (bf16: 1.162) | +0.63% |
-
-*Their quantized-matmul ConvRot preset (compiled and uncompiled) failed on
-current Triton ("Kernel requires a runtime memory allocation, but no
-allocator was set"); the documented dequant-first int8+H256 route ran.
-
-Honest reading, both directions: int8 at 0.5x is effectively lossless and the
-torch stack is absolutely faster at this small-model scale. SquareQ's case is
-the 0.29x byte class (no competing offering) and large-model residency —
-Krea-2 at 1024px trains fully resident and FASTER than fp8 on a 16 GB card,
-a configuration neither fp8 nor 0.5x int8 bases can fit.
-
-The production training/inference runtime (pure Mojo: fused kernels, resident
-block streaming, the trainers these numbers come from) lives in
-[CodeAlexx/mojodiffusion](https://github.com/CodeAlexx/mojodiffusion).
